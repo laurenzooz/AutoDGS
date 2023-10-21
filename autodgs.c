@@ -85,7 +85,7 @@ enum {
     API_STATE_STR,  // convenience drefs
     API_OPERATION_MODE_STR,
     API_RAMP,
-    API_RAMP_OVERRIDE_STR
+    API_RAMP_PRESELECT_STR
 };
 
 typedef enum
@@ -106,7 +106,7 @@ static opmode_t operation_mode = MODE_AUTO;
 static state_t state = DISABLED;
 static float timestamp;
 
-static XPLMCommandRef cycle_dgs_cmdr, move_dgs_closer_cmdr, activate_cmdr, toggle_jetway_cmdr, stop_stand_override_cmdr;
+static XPLMCommandRef cycle_dgs_cmdr, move_dgs_closer_cmdr, activate_cmdr, toggle_jetway_cmdr, delete_preselected_cmdr;
 
 /* Datarefs */
 static XPLMDataRef ref_plane_x, ref_plane_y, ref_plane_z;
@@ -120,8 +120,8 @@ static XPLMProbeRef ref_probe;
 static int status, track, lr;
 static int icao[4];
 static float azimuth, distance;
-static char overriden_ramp[34];
-static int is_ramp_overridden = 0; 
+static char preselected_ramp[34];
+static int is_ramp_preselected = 0; 
 
 
 /* Internal state */
@@ -200,7 +200,7 @@ reset_state(state_t new_state)
     state = new_state;
     nearest_ramp = NULL;
     dgs_ramp_dist = dgs_ramp_dist_default;
-    is_ramp_overridden = 0;
+    is_ramp_preselected = 0;
 
     if (dgs_inst_ref) {
         XPLMDestroyInstance(dgs_inst_ref);
@@ -390,8 +390,8 @@ api_getbytes(XPLMDataRef ref, void *out, int ofs, int n)
                 strncpy(buf, nearest_ramp->name, buflen - 1);
             break;
 
-        case API_RAMP_OVERRIDE_STR:
-                strncpy(buf, overriden_ramp, buflen - 1);
+        case API_RAMP_PRESELECT_STR:
+                strncpy(buf, preselected_ramp, buflen - 1);
             break;
     }
 
@@ -399,7 +399,7 @@ api_getbytes(XPLMDataRef ref, void *out, int ofs, int n)
     return n;
 }
 
-api_setbytes(void* ref, void *in, int ofs, int n) // to write the override dataref
+api_setbytes(void* ref, void *in, int ofs, int n) // to write the preselect dataref
 {
     static const int buflen = 34;
     char buf[buflen];
@@ -416,7 +416,7 @@ api_setbytes(void* ref, void *in, int ofs, int n) // to write the override datar
     memset(buf, 0, buflen);
 
     switch ((long long)ref) {
-        case API_RAMP_OVERRIDE_STR:
+        case API_RAMP_PRESELECT_STR:
             if (state >= ACTIVE) { reset_state(ACTIVE); } else { reset_state(INACTIVE); }
             // reset the state when changing the object. Reset back to active only if it was already activated
 
@@ -424,7 +424,7 @@ api_setbytes(void* ref, void *in, int ofs, int n) // to write the override datar
             break;
     }
 
-    memcpy(&overriden_ramp, buf + ofs, n);
+    memcpy(&preselected_ramp, buf + ofs, n);
     return n;
 }
 
@@ -477,12 +477,12 @@ set_dgs_pos(void)
 static void
 find_nearest_ramp()
 {
-    XPLMDataRef ramp_override_ref = XPLMFindDataRef("AutoDGS/ramp_override_str");
-    int ramp_name_len = XPLMGetDatab(ramp_override_ref, NULL, 0, 0);
+    XPLMDataRef ramp_preselect_ref = XPLMFindDataRef("AutoDGS/ramp_preselect_str");
+    int ramp_name_len = XPLMGetDatab(ramp_preselect_ref, NULL, 0, 0);
     char new_ramp_name[ramp_name_len + 1];
 
     if (ramp_name_len > 0) {
-        XPLMGetDatab(ramp_override_ref, &new_ramp_name, 0, ramp_name_len + 1);
+        XPLMGetDatab(ramp_preselect_ref, &new_ramp_name, 0, ramp_name_len + 1);
         new_ramp_name[ramp_name_len] = '\0';
     } // get the wanted ramp name and null terminate the string.
     
@@ -505,18 +505,18 @@ find_nearest_ramp()
     for (const ramp_start_t *ramp = avl_first(&arpt->ramp_starts); ramp != NULL;
         ramp = AVL_NEXT(&arpt->ramp_starts, ramp)) {
 
-        if (ramp_name_len > 0 && strcmp(ramp->name, new_ramp_name) == 0) { // Check if ramp override string is set and the ramp is found on current airport
-			is_ramp_overridden = 1;
+        if (ramp_name_len > 0 && strcmp(ramp->name, new_ramp_name) == 0) { // Check if ramp is preselected and the ramp is found on current airport
+			is_ramp_preselected = 1;
 		} else {
-			is_ramp_overridden = 0;
+			is_ramp_preselected = 0;
 		}
      
 
         // heading in local system
         float local_hdgt = rel_angle(ramp->hdgt, plane_hdgt);
 
-        if (fabs(local_hdgt) > 90.0 && is_ramp_overridden == 0)
-            continue;   // not looking to ramp. Doesn't matter if ramp is overriden
+        if (fabs(local_hdgt) > 90.0 && is_ramp_preselected == 0)
+            continue;   // not looking to ramp. Doesn't matter if ramp is preselected
 
         double s_x, s_y, s_z;
         XPLMWorldToLocal(ramp->pos.lat, ramp->pos.lon, plane_elevation, &s_x, &s_y, &s_z);
@@ -535,13 +535,13 @@ find_nearest_ramp()
         float nw_x = local_x + plane_nw_z * sin(D2R * local_hdgt);
 
         float d = sqrt(SQR(nw_x) + SQR(nw_z));
-        if (d > CAP_Z + 50 && is_ramp_overridden == 0) // fast exit
+        if (d > CAP_Z + 50 && is_ramp_preselected == 0) // fast exit
             continue;
 
         //logMsg("stand: %s, z: %2.1f, x: %2.1f", ramp->name, nw_z, nw_x);
 
         // behind
-        if (nw_z < -4.0 && is_ramp_overridden == 0) {
+        if (nw_z < -4.0 && is_ramp_preselected == 0) {
             //logMsg("behind: %s", ramp->name);
             continue;
         }
@@ -551,7 +551,7 @@ find_nearest_ramp()
             //logMsg("angle to plane: %s, %3.1f", ramp->name, angle);
 
             // check whether plane is in a +-60° sector relative to stand
-            if (fabsf(angle) > 60.0 && is_ramp_overridden == 0)
+            if (fabsf(angle) > 60.0 && is_ramp_preselected == 0)
                 continue;
 
             // drive-by and beyond a +- 60° sector relative to plane's direction
@@ -559,7 +559,7 @@ find_nearest_ramp()
             //logMsg("rel_to_stand: %s, nw_x: %0.1f, local_hdgt %0.1f, rel_to_stand: %0.1f",
             //       ramp->name, nw_x, local_hdgt, rel_to_stand);
             if (((nw_x > 10.0 && rel_to_stand < -60.0)
-                || (nw_x < -10.0 && rel_to_stand > 60.0)) && is_ramp_overridden == 0) {
+                || (nw_x < -10.0 && rel_to_stand > 60.0)) && is_ramp_preselected == 0) {
                 //logMsg("drive by %s", ramp->name);
                 continue;
             }
@@ -569,7 +569,7 @@ find_nearest_ramp()
         static const float azi_weight = 4.0;
         d = sqrt(SQR(azi_weight * nw_x)+ SQR(nw_z));
 
-        if (d < dist || is_ramp_overridden == 1) {
+        if (d < dist || is_ramp_preselected == 1) {
             //logMsg("new min: %s, z: %2.1f, x: %2.1f", ramp->name, nw_z, nw_x);
             dist = d;
             min_ramp = ramp;
@@ -579,7 +579,7 @@ find_nearest_ramp()
             stand_dir_x = s_dir_x;
             stand_dir_z = s_dir_z;
 
-            if (is_ramp_overridden == 1) { break; } // if ramp is overwritten, set the position and break as there's no need to look through rest of the ramps
+            if (is_ramp_preselected == 1) { break; } // if ramp is overwritten, set the position and break as there's no need to look through rest of the ramps
         }
     }
 
@@ -613,12 +613,12 @@ run_state_machine()
         return 2.0;
 
     // throttle costly search
-    if (now > nearest_ramp_ts + 2.0 && is_ramp_overridden == 0) {
+    if (now > nearest_ramp_ts + 2.0 && is_ramp_preselected == 0) {
         find_nearest_ramp();
         nearest_ramp_ts = now;
     }
 
-    if (nearest_ramp == NULL && is_ramp_overridden == 0) {
+    if (nearest_ramp == NULL && is_ramp_preselected == 0) {
         state = ACTIVE;
         return 2.0;
     }
@@ -945,10 +945,10 @@ cmd_move_dgs_closer(XPLMCommandRef cmdr, XPLMCommandPhase phase, void *ref)
 
 
 static int
-cmd_stop_stand_override_cb(XPLMCommandRef cmdr, XPLMCommandPhase phase, void *ref) // overriden stand to empty string -> can select stands normally
+cmd_delete_preselected_cb(XPLMCommandRef cmdr, XPLMCommandPhase phase, void *ref) // preselected stand to empty string -> can select stands normally
 {
-    XPLMDataRef stand_override_ref = XPLMFindDataRef("AutoDGS/ramp_override_str");
-    XPLMSetDatab(stand_override_ref, "\0", 0, 1);
+    XPLMDataRef ramp_preselect_ref = XPLMFindDataRef("AutoDGS/ramp_preselect_str");
+    XPLMSetDatab(ramp_preselect_ref, "\0", 0, 1);
 
     return 0;
 }
@@ -1045,9 +1045,9 @@ XPluginStart(char *outName, char *outSig, char *outDesc)
                              NULL, NULL, NULL, NULL, NULL, NULL, NULL, api_getbytes, NULL,
                              (void *)API_RAMP, NULL);
 
-    XPLMRegisterDataAccessor("AutoDGS/ramp_override_str", xplmType_Data, 1, NULL, NULL, NULL,
+    XPLMRegisterDataAccessor("AutoDGS/ramp_preselect_str", xplmType_Data, 1, NULL, NULL, NULL,
                              NULL, NULL, NULL, NULL, NULL, NULL, NULL, api_getbytes, api_setbytes,
-                             (void *)API_RAMP_OVERRIDE_STR, (void *)API_RAMP_OVERRIDE_STR);
+                             (void *)API_RAMP_PRESELECT_STR, (void *)API_RAMP_PRESELECT_STR);
 
     int is_XP11 = (XPLMGetDatai(ref_xp_version) < 120000);
     const char *obj_name[2];
@@ -1080,8 +1080,8 @@ XPluginStart(char *outName, char *outSig, char *outDesc)
     activate_cmdr = XPLMCreateCommand("AutoDGS/activate", "Manually activate searching for stands");
     XPLMRegisterCommandHandler(activate_cmdr, cmd_activate_cb, 0, NULL);
     
-    stop_stand_override_cmdr = XPLMCreateCommand("AutoDGS/stop_stand_override", "Stop stand override, plugin will select stands automatically again");
-    XPLMRegisterCommandHandler(stop_stand_override_cmdr, cmd_stop_stand_override_cb, 0, NULL);
+    delete_preselected_cmdr = XPLMCreateCommand("AutoDGS/delete_preselected", "Stop stand override, plugin will select stands automatically again");
+    XPLMRegisterCommandHandler(delete_preselected_cmdr, cmd_delete_preselected_cb, 0, NULL);
 
     /* menu */
     XPLMMenuID menu = XPLMFindPluginsMenu();
@@ -1091,7 +1091,7 @@ XPluginStart(char *outName, char *outSig, char *outDesc)
     XPLMAppendMenuItem(adgs_menu, "Manually activate", &activate_cmdr, 0);
     XPLMAppendMenuItem(adgs_menu, "Cycle DGS", &cycle_dgs_cmdr, 0);
     XPLMAppendMenuItem(adgs_menu, "Move DGS closer by 2m", &move_dgs_closer_cmdr, 0);
-    XPLMAppendMenuItem(adgs_menu, "Stop stand override", &stop_stand_override_cmdr, 0);
+    XPLMAppendMenuItem(adgs_menu, "Delete preselected stand", &delete_preselected_cmdr, 0);
 
     /* foreign commands */
     toggle_jetway_cmdr = XPLMFindCommand("sim/ground_ops/jetway");
